@@ -2,65 +2,118 @@
 <html>
   <head>
     <title>Terminal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#1e1e1e" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
     <style>
-      body { margin: 0; background: #1e1e1e; height: 100vh; overflow: hidden; }
+      body { 
+        margin: 0; 
+        background: #1e1e1e; 
+        height: 100vh; 
+        width: 100vw;
+        overflow: hidden; 
+        /* [Mobile] Handle safe areas for notches/home bars */
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+        box-sizing: border-box;
+      }
       #terminal { height: 100%; width: 100%; }
+      /* [Mobile] Hide scrollbars */
+      ::-webkit-scrollbar { display: none; }
     </style>
   </head>
   <body>
     <div id="terminal"></div>
+    
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+
     <script>
-      // Initialize Terminal
+      // 1. INITIALIZATION
       const term = new Terminal({
         cursorBlink: true,
-        fontFamily: 'Menlo, Consolas, monospace',
-        theme: { background: "#1e1e1e" }
+        fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
+        fontSize: 14, // Readable size for mobile
+        theme: { background: "#1e1e1e" },
+        allowProposedApi: true,
+        macOptionIsMeta: true,
+        rightClickSelectsWord: true
       });
+
       const fitAddon = new FitAddon.FitAddon();
+      const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+      
       term.loadAddon(fitAddon);
+      term.loadAddon(webLinksAddon); // [Full Terminal] Clickable links
       term.open(document.getElementById("terminal"));
       fitAddon.fit();
 
-      // Connect
-      // Grab the token from the current URL to pass to the WebSocket connection
+      // [Mobile] Focus terminal on touch to bring up keyboard if needed
+      document.getElementById('terminal').addEventListener('touchstart', () => {
+        term.focus();
+      }, { passive: true });
+
+      // [Mobile] Prevent body scrolling
+      document.body.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+      // 2. CONNECTION & SECURITY
       const params = new URLSearchParams(window.location.search);
-      const token = params.get("token") || "";
+      const token = params.get("token") || ""; // Fallback for testing
+      
+      // [Security] Pass token via WebSocket Protocol Header (avoids URL logging)
+      // The second argument in new WebSocket() sets the Sec-WebSocket-Protocol header
       const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
-      const wsUrl = `${wsProtocol}${location.host}/terminal?token=${token}`;
+      const wsUrl = `${wsProtocol}${location.host}/terminal`;
+      
+      // We pass the token as the "protocol". The server/worker must accept this.
+      const socket = new WebSocket(wsUrl, token ? [token] : []);
 
-      const socket = new WebSocket(wsUrl);
+      // 3. HEARTBEAT & PERFORMANCE
+      let pingInterval;
 
-      // 1. HANDLE INPUT (Send as JSON)
+      socket.onopen = () => {
+        term.write("\x1b[32mConnected securely.\x1b[0m\r\n");
+        onResize();
+        
+        // [Performance] Keep connection alive on mobile networks
+        pingInterval = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 30000);
+      };
+
+      socket.onclose = () => {
+        term.write("\r\n\x1b[31mConnection closed.\x1b[0m");
+        clearInterval(pingInterval);
+      };
+
+      socket.onmessage = (event) => {
+        // [Performance] Output raw strings directly to xterm (fastest)
+        term.write(event.data);
+      };
+
+      // 4. INPUT HANDLING
       term.onData((data) => {
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: "input", data: data }));
         }
       });
 
-      // 2. HANDLE RESIZE (Send as JSON)
+      // 5. RESIZE HANDLING (DEBOUNCED)
+      let resizeTimeout;
       function onResize() {
-        fitAddon.fit();
-        if (socket.readyState === WebSocket.OPEN) {
-          const { cols, rows } = term;
-          socket.send(JSON.stringify({ type: "resize", cols, rows }));
-        }
+        // [Performance] Debounce resize to prevent flooding the server
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => {
+          fitAddon.fit();
+          if (socket.readyState === WebSocket.OPEN) {
+            const { cols, rows } = term;
+            socket.send(JSON.stringify({ type: "resize", cols, rows }));
+          }
+        }, 100);
       }
       window.addEventListener("resize", onResize);
-
-      // 3. HANDLE INCOMING DATA (Raw Text)
-      socket.onmessage = (event) => {
-        term.write(event.data);
-      };
-
-      socket.onopen = () => {
-        term.write("\x1b[32mConnected via Cloudflare Workers.\x1b[0m\r\n");
-        onResize(); // Sync initial size
-      };
-      
-      socket.onclose = () => term.write("\r\n\x1b[31mConnection closed.\x1b[0m");
     </script>
   </body>
 </html>
